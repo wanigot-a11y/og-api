@@ -1,6 +1,4 @@
-[package.json](https://github.com/user-attachments/files/25824387/package.json)
 {
   "name": "og-api",
-  "version": "1.0.0",
-  "description": "OG Metadata extraction API with redirect following"
+  "version": "1.0.0"
 }
