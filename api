@@ -1,111 +1,113 @@
-module.exports = async function handler(req, res) {
-  // CORS 허용
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+const https = require('https');
+const http = require('http');
+const url = require('url');
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+function fetchUrl(targetUrl, redirectCount) {
+  redirectCount = redirectCount || 0;
+  if (redirectCount > 10) return Promise.reject(new Error('Too many redirects'));
 
-  const { url } = req.query;
+  return new Promise(function(resolve, reject) {
+    const parsedUrl = url.parse(targetUrl);
+    const lib = parsedUrl.protocol === 'https:' ? https : http;
 
-  if (!url) {
-    return res.status(400).json({ error: 'URL이 필요합니다' });
-  }
-
-  try {
-    // 리다이렉트를 끝까지 추적해서 최종 URL 가져오기
-    const finalUrl = await followRedirects(url);
-
-    // 최종 URL에서 HTML 가져오기
-    const response = await fetch(finalUrl, {
+    const options = {
+      hostname: parsedUrl.hostname,
+      path: parsedUrl.path,
+      method: 'GET',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8',
-      },
-      redirect: 'follow',
-    });
-
-    const html = await response.text();
-
-    // OG 메타데이터 파싱
-    const getMeta = (html, property) => {
-      const patterns = [
-        new RegExp('<meta[^>]*property=["\']' + property + '["\'][^>]*content=["\']([^"\']*)["\']', 'i'),
-        new RegExp('<meta[^>]*content=["\']([^"\']*)["\'][^>]*property=["\']' + property + '["\']', 'i'),
-        new RegExp('<meta[^>]*name=["\']' + property + '["\'][^>]*content=["\']([^"\']*)["\']', 'i'),
-        new RegExp('<meta[^>]*content=["\']([^"\']*)["\'][^>]*name=["\']' + property + '["\']', 'i'),
-      ];
-      for (const pattern of patterns) {
-        const match = html.match(pattern);
-        if (match) return decodeHtmlEntities(match[1]);
       }
-      return '';
     };
 
-    const getTitleTag = (html) => {
-      const match = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-      return match ? decodeHtmlEntities(match[1].trim()) : '';
-    };
+    const req = lib.request(options, function(res) {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        const location = res.headers.location;
+        const nextUrl = location.startsWith('http') ? location : url.resolve(targetUrl, location);
+        resolve(fetchUrl(nextUrl, redirectCount + 1));
+        return;
+      }
 
-    const title = getMeta(html, 'og:title') || getMeta(html, 'twitter:title') || getTitleTag(html);
-    const description = getMeta(html, 'og:description') || getMeta(html, 'twitter:description') || getMeta(html, 'description');
-    const image = getMeta(html, 'og:image') || getMeta(html, 'twitter:image');
-    const siteName = getMeta(html, 'og:site_name');
-
-    // 상대 이미지 URL → 절대 URL 변환
-    let absImage = image;
-    if (image && !image.startsWith('http')) {
-      const base = new URL(finalUrl);
-      absImage = base.origin + (image.startsWith('/') ? '' : '/') + image;
-    }
-
-    return res.status(200).json({
-      title,
-      description,
-      image: absImage,
-      siteName,
-      url: finalUrl,
-      originalUrl: url,
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', function(chunk) { data += chunk; });
+      res.on('end', function() { resolve({ html: data, finalUrl: targetUrl }); });
     });
 
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
+    req.on('error', reject);
+    req.setTimeout(10000, function() { req.destroy(); reject(new Error('Timeout')); });
+    req.end();
+  });
 }
 
-// 리다이렉트 추적 함수
-async function followRedirects(url, maxRedirects = 10) {
-  let currentUrl = url;
-  for (let i = 0; i < maxRedirects; i++) {
-    const res = await fetch(currentUrl, {
-      method: 'HEAD',
-      redirect: 'manual',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      },
-    });
-    if (res.status >= 300 && res.status < 400) {
-      const location = res.headers.get('location');
-      if (!location) break;
-      currentUrl = location.startsWith('http') ? location : new URL(location, currentUrl).href;
-    } else {
-      break;
-    }
+function getMeta(html, property) {
+  const patterns = [
+    new RegExp('<meta[^>]+property=["\']' + property + '["\'][^>]+content=["\']([^"\']*)["\']', 'i'),
+    new RegExp('<meta[^>]+content=["\']([^"\']*)["\'][^>]+property=["\']' + property + '["\']', 'i'),
+    new RegExp('<meta[^>]+name=["\']' + property + '["\'][^>]+content=["\']([^"\']*)["\']', 'i'),
+    new RegExp('<meta[^>]+content=["\']([^"\']*)["\'][^>]+name=["\']' + property + '["\']', 'i'),
+  ];
+  for (var i = 0; i < patterns.length; i++) {
+    var match = html.match(patterns[i]);
+    if (match) return decodeEntities(match[1]);
   }
-  return currentUrl;
+  return '';
 }
 
-// HTML 엔티티 디코딩
-function decodeHtmlEntities(str) {
+function getTitle(html) {
+  var match = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+  return match ? decodeEntities(match[1].trim()) : '';
+}
+
+function decodeEntities(str) {
   return str
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/&#x27;/g, "'")
     .replace(/&nbsp;/g, ' ');
 }
+
+module.exports = function(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
+
+  var targetUrl = req.query && req.query.url;
+  if (!targetUrl) {
+    res.status(400).json({ error: 'url 파라미터가 필요합니다' });
+    return;
+  }
+
+  fetchUrl(targetUrl, 0).then(function(result) {
+    var html = result.html;
+    var finalUrl = result.finalUrl;
+
+    var title = getMeta(html, 'og:title') || getMeta(html, 'twitter:title') || getTitle(html);
+    var description = getMeta(html, 'og:description') || getMeta(html, 'twitter:description') || getMeta(html, 'description');
+    var image = getMeta(html, 'og:image') || getMeta(html, 'twitter:image');
+    var siteName = getMeta(html, 'og:site_name');
+
+    if (image && !image.startsWith('http')) {
+      var parsed = url.parse(finalUrl);
+      image = parsed.protocol + '//' + parsed.host + (image.startsWith('/') ? '' : '/') + image;
+    }
+
+    res.status(200).json({
+      title: title,
+      description: description,
+      image: image,
+      siteName: siteName,
+      url: finalUrl,
+      originalUrl: targetUrl
+    });
+  }).catch(function(err) {
+    res.status(500).json({ error: err.message });
+  });
+};
