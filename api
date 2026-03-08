@@ -1,1 +1,112 @@
 
+export default async function handler(req, res) {
+  // CORS 허용
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  const { url } = req.query;
+
+  if (!url) {
+    return res.status(400).json({ error: 'URL이 필요합니다' });
+  }
+
+  try {
+    // 리다이렉트를 끝까지 추적해서 최종 URL 가져오기
+    const finalUrl = await followRedirects(url);
+
+    // 최종 URL에서 HTML 가져오기
+    const response = await fetch(finalUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8',
+      },
+      redirect: 'follow',
+    });
+
+    const html = await response.text();
+
+    // OG 메타데이터 파싱
+    const getMeta = (html, property) => {
+      const patterns = [
+        new RegExp('<meta[^>]*property=["\']' + property + '["\'][^>]*content=["\']([^"\']*)["\']', 'i'),
+        new RegExp('<meta[^>]*content=["\']([^"\']*)["\'][^>]*property=["\']' + property + '["\']', 'i'),
+        new RegExp('<meta[^>]*name=["\']' + property + '["\'][^>]*content=["\']([^"\']*)["\']', 'i'),
+        new RegExp('<meta[^>]*content=["\']([^"\']*)["\'][^>]*name=["\']' + property + '["\']', 'i'),
+      ];
+      for (const pattern of patterns) {
+        const match = html.match(pattern);
+        if (match) return decodeHtmlEntities(match[1]);
+      }
+      return '';
+    };
+
+    const getTitleTag = (html) => {
+      const match = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+      return match ? decodeHtmlEntities(match[1].trim()) : '';
+    };
+
+    const title = getMeta(html, 'og:title') || getMeta(html, 'twitter:title') || getTitleTag(html);
+    const description = getMeta(html, 'og:description') || getMeta(html, 'twitter:description') || getMeta(html, 'description');
+    const image = getMeta(html, 'og:image') || getMeta(html, 'twitter:image');
+    const siteName = getMeta(html, 'og:site_name');
+
+    // 상대 이미지 URL → 절대 URL 변환
+    let absImage = image;
+    if (image && !image.startsWith('http')) {
+      const base = new URL(finalUrl);
+      absImage = base.origin + (image.startsWith('/') ? '' : '/') + image;
+    }
+
+    return res.status(200).json({
+      title,
+      description,
+      image: absImage,
+      siteName,
+      url: finalUrl,
+      originalUrl: url,
+    });
+
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+}
+
+// 리다이렉트 추적 함수
+async function followRedirects(url, maxRedirects = 10) {
+  let currentUrl = url;
+  for (let i = 0; i < maxRedirects; i++) {
+    const res = await fetch(currentUrl, {
+      method: 'HEAD',
+      redirect: 'manual',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+    });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location');
+      if (!location) break;
+      currentUrl = location.startsWith('http') ? location : new URL(location, currentUrl).href;
+    } else {
+      break;
+    }
+  }
+  return currentUrl;
+}
+
+// HTML 엔티티 디코딩
+function decodeHtmlEntities(str) {
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&nbsp;/g, ' ');
+}
